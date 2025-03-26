@@ -1,0 +1,28 @@
+run = "npm run dev"
+entrypoint = "server/index.ts"
+
+[nix]
+channel = "stable-23_11"
+
+[deployment]
+build = ["npm", "run", "build"]
+run = ["node", "dist/index.js"]
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[languages.javascript]
+pattern = "**/{*.js,*.jsx,*.ts,*.tsx}"
+syntax = "javascript"
+
+[languages.javascript.languageServer]
+start = ["typescript-language-server", "--stdio"]
+
+[languages.html]
+pattern = "**/*.html"
+syntax = "html"
+
+[languages.css]
+pattern = "**/*.css"
+syntax = "css"
