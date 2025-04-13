@@ -128,14 +128,15 @@ var BackupService = /** @class */ (function () {
      * Cria as tabelas necessárias no banco de backup
      */
     BackupService.prototype.createBackupTables = function () {
+        // This function creates the backup tables.
         return __awaiter(this, void 0, void 0, function () {
             var tableInfo, hasKeyColumn, hasValueColumn, schemaError_1, error_2, settings, setpoints;
             return __generator(this, function (_a) {
                 switch (_a.label) {
-                    case 0:
-                        _a.trys.push([0, 14, , 15]);
+                    case 0:                        
+                       
                         // Tabela readings com campos adicionais
-                        return [4 /*yield*/, this.backupDb.exec("\n        CREATE TABLE IF NOT EXISTS readings (\n          id INTEGER PRIMARY KEY,\n          temperature REAL NOT NULL,\n          level REAL NOT NULL,\n          pump_status INTEGER NOT NULL,\n          heater_status INTEGER NOT NULL,\n          timestamp TEXT NOT NULL,\n          temperature_trend REAL DEFAULT 0,\n          level_trend REAL DEFAULT 0,\n          is_temp_critical INTEGER DEFAULT 0,\n          is_level_critical INTEGER DEFAULT 0,\n          data_source TEXT DEFAULT 'thingspeak',\n          data_quality REAL DEFAULT 1.0\n        )\n      ")];
+                         _a.trys.push([0, 14, , 15]); return [4 /*yield*/, this.backupDb.exec("\n        CREATE TABLE IF NOT EXISTS readings (\n          id INTEGER PRIMARY KEY,\n          temperature REAL NOT NULL,\n          level REAL NOT NULL,\n          pump_status INTEGER NOT NULL,\n          heater_status INTEGER NOT NULL,\n          timestamp TEXT NOT NULL,\n          temperature_trend REAL DEFAULT 0,\n          level_trend REAL DEFAULT 0,\n          is_temp_critical INTEGER DEFAULT 0,\n          is_level_critical INTEGER DEFAULT 0,\n          data_source TEXT DEFAULT 'thingspeak',\n          data_quality REAL DEFAULT 1.0\n        )\n      ")];
                     case 1:
                         // Tabela readings com campos adicionais
                         _a.sent();
@@ -174,9 +175,11 @@ var BackupService = /** @class */ (function () {
                         console.info('✅ Verificação e correção do esquema da tabela settings concluída');
                         return [3 /*break*/, 11];
                     case 10:
-                        schemaError_1 = _a.sent();
+                        
                         return [3 /*break*/, 11];
-                    case 11: 
+                    case 11:
+                        schemaError_1 = _a.sent();
+                        
                         // Tabela de alertas (nova tabela para backup)
                         return [4 /*yield*/, this.backupDb.exec("\n        CREATE TABLE IF NOT EXISTS alerts (\n          id INTEGER PRIMARY KEY AUTOINCREMENT,\n          type TEXT NOT NULL,\n          severity TEXT NOT NULL,\n          message TEXT NOT NULL,\n          reading_id INTEGER NOT NULL,\n          created_at TEXT DEFAULT CURRENT_TIMESTAMP,\n          is_acknowledged INTEGER DEFAULT 0,\n          FOREIGN KEY (reading_id) REFERENCES readings (id)\n        )\n      ")];
                     case 12:
@@ -189,13 +192,10 @@ var BackupService = /** @class */ (function () {
                         _a.sent();
                         // Tabela de histórico de sincronizações (nova tabela para backup)
                         _a.label = 14;
-                    case 14: return [4 /*yield*/, this.backupDb.exec("\n        CREATE TABLE IF NOT EXISTS sync_history (\n          id INTEGER PRIMARY KEY AUTOINCREMENT,\n          timestamp TEXT NOT NULL,\n          success INTEGER NOT NULL,\n          record_count INTEGER NOT NULL,\n          error_message TEXT\n        )\n      ")];
-                    case 15: 
-                        // Tabela de histórico de sincronizações (nova tabela para backup)
-                        _a.sent();                
-                        return [3 /*break*/,16];
+                    case 15:
+                        _a.sent();
+                        _a.label = 16;
                     case 16:
-                       _a.trys.push([16,16,16,16])
                         error_2 = _a.sent();
                         console.error("".concat(this.ERROR_PREFIX, " \u274C Error creating backup tables:"), error_2);
                         throw error_2;                       
@@ -212,22 +212,22 @@ var BackupService = /** @class */ (function () {
                          _a.sent();
                         _a.label = 20;
                         
-                        return [3/*break*/,22]
+                        return [3 /*break*/, 22];
                    
                     case 20: 
-
-                    case 19: return [4 /*yield*/, this.backupDb.get('SELECT COUNT(*) as count FROM setpoints')];
-                    case 20:
-                        setpoints = _a.sent();
-                        if (!(setpoints.count === 0)) return [3 /*break*/, 22];
-                        return [4 /*yield*/, this.backupDb.run("INSERT INTO setpoints (temp_min, temp_max, level_min, level_max) VALUES (?, ?, ?, ?)", [25.0, 28.0, 60.0, 80.0])];
+                        return [4 /*yield*/, this.backupDb.get('SELECT COUNT(*) as count FROM setpoints')];
                     case 21:
+                        setpoints = _a.sent();
+                        if (!(setpoints.count === 0)) return [3 /*break*/, 23];
+                        return [4 /*yield*/, this.backupDb.run("INSERT INTO setpoints (temp_min, temp_max, level_min, level_max) VALUES (?, ?, ?, ?)", [25.0, 28.0, 60.0, 80.0])];
+                    case 22:
                         _a.sent();
                         _a.label = 22;
                     case 22:
                         console.info('✅ Backup database schema created successfully');
                         return [2 /*return*/];
-                        break;                        
+                    case 14:                     break;
+                                              
                     }
             });
         });
