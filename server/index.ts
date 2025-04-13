@@ -1,6 +1,8 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
+import { syncThingspeakToDatabase} from "./syncDatabase";
+import { ReadingService } from "./services/readingService";
 
 const app = express();
 app.use(express.json());
@@ -36,6 +38,14 @@ app.use((req, res, next) => {
   next();
 });
 
+// Criando o objeto syncService com o método importFromThingSpeak
+export const syncService = {
+  importFromThingSpeak: async (days: number) => {
+    return await syncThingspeakToDatabase(days);
+  },
+};
+// Exportando o objeto ReadingService diretamente como uma instância singleton
+export const readingsService = ReadingService;
 (async () => {
   const server = await registerRoutes(app);
 

@@ -1,5 +1,5 @@
 import { apiRequest } from "./queryClient";
-import { Reading } from "@shared/schema";
+import { Reading, type InsertReading } from "@shared/schema";
 
 export type ReadingsResponse = {
   readings: Reading[];
@@ -22,7 +22,7 @@ export type ReadingsResponse = {
  */
 export type DeviceStatusResponse = {
   // Estado principal que a interface exibe por padrão (normalmente do banco)
-  timestamp: string | number;
+  timestamp: Date;
   pumpStatus: boolean;
   heaterStatus: boolean;
   
@@ -31,15 +31,15 @@ export type DeviceStatusResponse = {
   source: 'memory' | 'database' | 'hybrid';
   
   // Estado em memória (atualizações mais recentes que podem não estar no banco ainda)
-  memoryState?: {
-    timestamp: string | number;
+  memoryState: {
+    timestamp: Date;
     pumpStatus: boolean;
     heaterStatus: boolean;
-  };
+  } | null;
   
   // Estado do banco (oficial, confirmado pelo ThingSpeak)
-  databaseState?: {
-    timestamp: string | number;
+  databaseState: {
+    timestamp: Date;
     pumpStatus?: boolean;
     heaterStatus?: boolean;
   } | null;
@@ -62,6 +62,22 @@ export type HistoricalReadingsResponse = ReadingsResponse & {
   };
 };
 
+export type ReadingWithDate = Omit<Reading, 'timestamp'> & {
+  timestamp: Date;
+};
+
+const ensureDate = (timestamp: any): Date => {
+  if (timestamp instanceof Date) {
+    return timestamp;
+  } else if (typeof timestamp === 'string' || typeof timestamp === 'number') {
+    return new Date(timestamp);
+  } else {
+    // Handle other cases, e.g., by throwing an error or returning a default date
+    console.error('Invalid timestamp format:', timestamp);
+    return new Date(); // Or throw an error
+  }
+};
+
 // Get latest readings
 export async function getLatestReadings(limit = 60): Promise<ReadingsResponse> {
   // Adicionar timestamp para evitar cache e melhorar desempenho
@@ -73,7 +89,18 @@ export async function getLatestReadings(limit = 60): Promise<ReadingsResponse> {
       'Expires': '0'
     }
   });
-  return res.json();
+
+  const response = await res.json() as ReadingsResponse;
+
+  return {
+    ...response,
+    readings: response.readings.map((reading) => ({
+      ...reading,
+      timestamp: ensureDate(reading.timestamp),
+    })),
+
+
+  };
 }
 
 // Get historical readings from database
@@ -85,7 +112,18 @@ export async function getHistoricalReadings(
     "GET",
     `/api/readings/history?startDate=${startDate}&endDate=${endDate}`
   );
-  return res.json();
+
+  const response = await res.json() as HistoricalReadingsResponse;
+
+  return {
+    ...response,
+    readings: response.readings.map((reading) => ({
+      ...reading,
+      timestamp: ensureDate(reading.timestamp),
+    })),
+
+
+  };
 }
 
 // Get historical readings directly from ThingSpeak
@@ -102,7 +140,17 @@ export async function getThingspeakHistoricalReadings(
   }
   
   const res = await apiRequest("GET", url);
-  return res.json();
+  const response = await res.json() as HistoricalReadingsResponse;
+
+  return {
+    ...response,
+    readings: response.readings.map((reading) => ({
+      ...reading,
+      timestamp: ensureDate(reading.timestamp),
+    })),
+
+
+  };
 }
 
 // Update pump status
@@ -116,7 +164,22 @@ export async function updatePumpStatus(status: boolean): Promise<{ success: bool
       'Expires': '0'
     }
   });
-  return res.json();
+
+    const response = await res.json() as DeviceStatusResponse;
+    return response;
+   /* return {
+    ...response,
+    timestamp: ensureDate(response.timestamp),
+    memoryState: response.memoryState ? {
+      ...response.memoryState,
+      timestamp: ensureDate(response.memoryState.timestamp)
+    } : null,
+    databaseState: response.databaseState ? {
+      ...response.databaseState,
+      timestamp: ensureDate(response.databaseState.timestamp)
+    } : null
+  }*/
+
 }
 
 // Update heater status
@@ -130,7 +193,21 @@ export async function updateHeaterStatus(status: boolean): Promise<{ success: bo
       'Expires': '0'
     }
   });
-  return res.json();
+    const response = await res.json() as DeviceStatusResponse;
+
+    return response;
+    /* return {
+       ...response,
+       timestamp: ensureDate(response.timestamp),
+       memoryState: response.memoryState ? {
+         ...response.memoryState,
+         timestamp: ensureDate(response.memoryState.timestamp)
+       } : null,
+       databaseState: response.databaseState ? {
+         ...response.databaseState,
+         timestamp: ensureDate(response.databaseState.timestamp)
+       } : null
+     }*/
 }
 
 // Update setpoints
@@ -178,5 +255,20 @@ export async function getDeviceStatus(): Promise<DeviceStatusResponse> {
       'Expires': '0'
     }
   });
-  return res.json();
+
+    const response = await res.json() as DeviceStatusResponse;
+    return {
+        ...response,
+        timestamp: ensureDate(response.timestamp),
+        memoryState: response.memoryState ? {
+            ...response.memoryState,
+            timestamp: ensureDate(response.memoryState.timestamp)
+        } : null,
+        databaseState: response.databaseState ? {
+            ...response.databaseState,
+            timestamp: ensureDate(response.databaseState.timestamp)
+        } : null
+    }
+
 }
+

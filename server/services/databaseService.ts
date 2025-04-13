@@ -1,21 +1,17 @@
-import sqlite3 from 'sqlite3';
-import { open } from 'sqlite';
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
+import { getDb } from '../db'; // Importando o gerenciador de conexão
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-// Corrigido para usar o caminho atual do projeto em vez de tentar usar caminhos relativos complexos
-const DB_PATH = path.resolve(process.cwd(), 'aquaponia.db');
+const DB_PATH = path.resolve(process.cwd(), process.env.DB_FILE || 'aquaponia.db');
 
-export async function createDb() {
-  // Primeiro vamos verificar se o arquivo existe e tem conteúdo
-  let needsInit = false;
-  
-  if (!fs.existsSync(DB_PATH)) {
-    needsInit = true;
-    // Criamos o diretório pai se necessário
+export async function initializeDb() {
+  try {
+    let needsInit = !fs.existsSync(DB_PATH) || fs.statSync(DB_PATH).size === 0;
+    if (needsInit) {
+      console.log('📁 Criando ou recriando banco de dados:', DB_PATH);
+      if (fs.existsSync(DB_PATH)) {
+        fs.unlinkSync(DB_PATH);
+      }
     const dir = path.dirname(DB_PATH);
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -23,24 +19,8 @@ export async function createDb() {
   } else {
     // Se o arquivo existe mas está vazio
     const stats = fs.statSync(DB_PATH);
-    if (stats.size === 0) {
-      needsInit = true;
-    }
   }
-  
-  if (needsInit) {
-    console.log('📁 Criando ou recriando banco de dados:', DB_PATH);
-    // Removemos o arquivo se existir
-    if (fs.existsSync(DB_PATH)) {
-      fs.unlinkSync(DB_PATH);
-    }
-  }
-
-  // Open database connection
-  const db = await open({
-    filename: DB_PATH,
-    driver: sqlite3.Database
-  });
+    const db = await getDb(); // Usando a função para obter a conexão
 
   console.log('🔄 Connected to database');
 
@@ -103,6 +83,11 @@ export async function createDb() {
   `);
 
   console.log('✅ Database initialized with default values');
-
-  return db;
+  } catch (error) {
+    console.error('❌ Error initializing database:', error);
+    throw error;
+  }
 }
+   
+   
+   

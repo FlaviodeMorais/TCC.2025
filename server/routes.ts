@@ -2,21 +2,45 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import cron from "node-cron";
 import { zodResolver } from '@hookform/resolvers/zod';
-import { storage } from "./storage";
-import { syncThingspeakToDatabase } from './syncDatabase';
-import { 
-  fetchLatestReading, 
-  fetchHistoricalReadings, 
-  updateDeviceStatus,
+import { log } from "./vite";
+import {
+  fetchLatestReading,
   updatePumpStatus,
   updateHeaterStatus,
+  fetchHistoricalReadings,
   getCurrentDeviceStatus,
-  REFRESH_INTERVAL 
 } from "./services/thingspeakService";
-import { Reading } from "@shared/schema";
 import { backupService } from "./services/backupService";
 import { insertSetpointSchema, insertSettingsSchema } from "@shared/schema";
 import { z } from "zod";
+import { readingsService } from "./index";
+import { syncService } from "./index";
+import { storage } from "./storage";
+
+const REFRESH_INTERVAL = 300000;
+
+const logRequest = (req: any, res: any, next: any) => {
+  const start = Date.now();
+  const path = req.path;
+  let capturedJsonResponse: Record<string, any> | undefined = undefined;
+
+  const originalResJson = res.json as typeof res.json;
+  res.json = function (bodyJson, ...args) {
+    capturedJsonResponse = bodyJson;
+    return originalResJson.apply(res, [bodyJson, ...args]);
+  };
+
+  res.on("finish", () => {
+    const duration = Date.now() - start;
+    let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
+    if (capturedJsonResponse) {
+      logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
+    }
+    log(logLine);
+  });
+  next();
+};
+
 import { aggregateReadingsByDateRange } from "./utils/dataAggregation";
 
 export async function registerRoutes(app: Express): Promise<Server> {
@@ -32,6 +56,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.log('Starting scheduled data collection...');
       const reading = await fetchLatestReading();
       if (reading) {
+        
+        console.log(`✅ Confirmação de atualização recebida do Thingspeak`);
         await storage.saveReading(reading);
         console.log('Data collection cycle completed successfully');
       } else {
@@ -64,260 +90,80 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // API Routes
   
   // Get latest readings
-  app.get('/api/readings/latest', async (req, res) => {
+  app.get('/api/readings/latest', logRequest, async (req, res) => {
+    console.log(`→ GET /api/readings/latest - Request received`);
     try {
+      
       const limit = parseInt(req.query.limit as string) || 60;
       const readings = await storage.getLatestReadings(limit);
-      const setpoints = await storage.getSetpoints();
-      
+      const setpoints = await readingsService.getSetpoints();
+      const stats = readingsService.calculateStatistics(readings);
       res.json({
         readings,
-        setpoints: {
-          temp: {
-            min: setpoints.tempMin,
-            max: setpoints.tempMax
-          },
-          level: {
-            min: setpoints.levelMin,
-            max: setpoints.levelMax
-          }
-        }
+        setpoints,
       });
     } catch (error) {
-      console.error('Error fetching latest readings:', error);
-      res.status(500).json({ error: 'Failed to fetch latest readings' });
+      console.error(`❌ GET /api/readings/latest - Error:`, error);
+      res.status(500).json({ error: 'ERR_READINGS_LATEST: Failed to fetch latest readings' });
     }
   });
   
   // Endpoint específico para verificar o status atual dos dispositivos
-  app.get('/api/device/status', async (req, res) => {
+  app.get('/api/device/status', logRequest, async (req, res) => {
+    console.log(`→ GET /api/device/status - Request received`);
     try {
-      // Obter o estado atual em memória (atualizações mais recentes)
-      const inMemoryStatus = getCurrentDeviceStatus();
-      
-      // Buscar também a leitura mais recente do banco de dados
       const latestReadings = await storage.getLatestReadings(1);
-      
-      // Verificar se há dados no banco
       if (!latestReadings || latestReadings.length === 0) {
-        // Se não há dados no banco, retornar apenas o status em memória com aviso
-        console.log('Sem leituras no banco, usando apenas o status em memória:', inMemoryStatus);
-        return res.json({
-          timestamp: inMemoryStatus.lastUpdate,
-          pumpStatus: inMemoryStatus.pumpStatus,
-          heaterStatus: inMemoryStatus.heaterStatus,
-          source: 'memory',
-          pendingSync: true, // Indica que os dados ainda não foram sincronizados com ThingSpeak
-          memoryState: inMemoryStatus,
-          databaseState: null
-        });
+        return res.status(404).json({ error: 'No device status data available' });
       }
-      
-      // Se temos dados do banco, mostrar ambas as fontes
+
       const latest = latestReadings[0];
-      console.log('Detalhes da última leitura do banco:', JSON.stringify(latest));
-      console.log('Status atual em memória:', JSON.stringify(inMemoryStatus));
-      
-      // Verificar se os estados são diferentes entre a memória e o banco de dados
-      const memoryPumpStatus = inMemoryStatus.pumpStatus;
-      const memoryHeaterStatus = inMemoryStatus.heaterStatus;
-      const dbPumpStatus = latest.pumpStatus;
-      const dbHeaterStatus = latest.heaterStatus;
-      
-      // Se os estados forem diferentes, considera que há sincronização pendente
-      const pendingSync = (memoryPumpStatus !== dbPumpStatus) || (memoryHeaterStatus !== dbHeaterStatus);
-      
-      // Preferimos o valor do banco se ele for mais recente que a memória (indicando que o ThingSpeak já confirmou)
-      // Caso contrário, informamos ambos os valores e deixamos o cliente decidir o que exibir
-      const databaseState = {
-        timestamp: latest.timestamp,
-        pumpStatus: latest.pumpStatus,
-        heaterStatus: latest.heaterStatus
-      };
-      
-      const memoryState = {
-        timestamp: inMemoryStatus.lastUpdate,
-        pumpStatus: inMemoryStatus.pumpStatus,
-        heaterStatus: inMemoryStatus.heaterStatus
-      };
-      
-      // Transparentemente enviar ambos os estados
       res.json({
         timestamp: latest.timestamp,
-        pumpStatus: latest.pumpStatus, // Enviar o valor oficial do banco
-        heaterStatus: latest.heaterStatus, // Enviar o valor oficial do banco
-        pendingSync: pendingSync, // Indicar se há uma atualização pendente
-        source: 'database', // A fonte principal de dados é o banco
-        memoryState: memoryState, // Estado em memória para a interface usar se quiser
-        databaseState: databaseState // Estado do banco (oficial)
+        pumpStatus: latest.pumpStatus,
+        heaterStatus: latest.heaterStatus,
       });
     } catch (error) {
-      console.error('Error fetching device status:', error);
-      res.status(500).json({ error: 'Failed to fetch device status' });
+      console.error(`❌ GET /api/device/status - Error:`, error);
+      res.status(500).json({ error: 'ERR_DEVICE_STATUS: Failed to fetch device status' });
     }
-  });
+  }); 
 
   // Get readings by date range from local database
-  app.get('/api/readings/history', async (req, res) => {
+  app.get('/api/readings/history', logRequest, async (req, res) => {
+    console.log(`→ GET /api/readings/history - Request received`);
     try {
       const { startDate, endDate } = req.query;
-      
+
       if (!startDate || !endDate) {
         return res.status(400).json({ error: 'Start and end dates are required' });
       }
-      
-      console.log(`Fetching readings from ${startDate} to ${endDate} from local database...`);
-      
-      // Limitar o número máximo de leituras retornadas para evitar sobrecarga
-      const MAX_READINGS = 1000;
-      
-      // A função de agregação já está importada no topo do arquivo
-      
-      // Calcular a diferença em dias para diagnóstico
+
       const start = new Date(startDate as string);
       const end = new Date(endDate as string);
-      const diffTime = Math.abs(end.getTime() - start.getTime());
-      const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24)) || 1;
-      
-      console.log(`SQL Query: Buscando leituras entre ${startDate} e ${endDate} (max: ${MAX_READINGS})`);
-      console.log(`Data inicial: ${start.toLocaleDateString()}, Data final ajustada: ${new Date(end.getTime() + 86400000).toLocaleDateString()}`);
-      
-      // Agora tentar buscar os dados do banco local
-      let readings: Reading[] = [];
-      try {
-        readings = await storage.getReadingsByDateRange(startDate as string, endDate as string, MAX_READINGS);
-        console.log(`Found ${readings.length} readings in the local database.`);
-      } catch (dbError) {
-        console.error("Erro ao buscar dados do banco:", dbError);
-        readings = [];
-      }
-      
-      // Se mesmo após a importação ainda não temos dados, usar o ThingSpeak diretamente
-      if (readings.length === 0) {
-        console.log('Nenhum dado encontrado no banco após importação. Buscando do ThingSpeak diretamente...');
-        
-        try {
-          // Buscar diretamente do ThingSpeak
-          console.log(`Fetching ${diffDays} days of data directly from ThingSpeak with timeout...`);
-          const thingspeakReadings = await fetchHistoricalReadings(diffDays);
-          
-          if (thingspeakReadings && thingspeakReadings.length > 0) {
-            console.log(`Obtidas ${thingspeakReadings.length} leituras diretamente do ThingSpeak.`);
-            
-            // Converter para o formato esperado - adicionar IDs para compatibilidade
-            readings = thingspeakReadings.map((r, index) => ({
-              ...r,
-              id: 10000 + index, // IDs temporários
-              pumpStatus: r.pumpStatus || false,
-              heaterStatus: r.heaterStatus || false,
-              timestamp: r.timestamp || new Date()
-            }));
-          }
-        } catch (thingspeakError) {
-          console.error("Erro ao buscar diretamente do ThingSpeak:", thingspeakError);
-        }
-      }
-      
-      // Se ainda não temos dados, retorne erro
-      if (!readings || readings.length === 0) {
-        console.log('Nenhum dado disponível após todas as tentativas.');
-        return res.status(404).json({ 
-          error: 'No data found for the selected period', 
-          message: 'Não há dados disponíveis para o período selecionado. Por favor, tente outro período.'
-        });
-      }
-      
-      // Aplicar a agregação com base no período selecionado
+      const readings = await readingsService.getHistoricalReadings('local', { startDate, endDate });
+
+      if (readings.length === 0) return res.status(404).json({ error: 'No data found for the selected period', message: 'Não há dados disponíveis para o período selecionado. Por favor, tente outro período.' });
+
+
       const aggregatedReadings = aggregateReadingsByDateRange(readings, start, end);
-      
-      const setpoints = await storage.getSetpoints();
-      const tempStats = storage.getTemperatureStats(readings); // Usamos os dados originais para estatísticas precisas
-      const levelStats = storage.getLevelStats(readings);
-      
+      const setpoints = await readingsService.getSetpoints();
+      const stats = readingsService.calculateStatistics(aggregatedReadings);
+
       res.json({
         readings: aggregatedReadings, // Enviamos os dados agregados
-        setpoints: {
-          temp: {
-            min: setpoints.tempMin,
-            max: setpoints.tempMax
-          },
-          level: {
-            min: setpoints.levelMin,
-            max: setpoints.levelMax
-          }
-        },
-        stats: {
-          temperature: tempStats,
-          level: levelStats
-        }
+        setpoints,
+        stats
       });
     } catch (error) {
-      console.error('Error fetching readings history:', error);
-      res.status(500).json({ error: 'Failed to fetch readings history' });
+      console.error(`❌ GET /api/readings/history - Error:`, error);
+      res.status(500).json({ error: 'ERR_READINGS_HISTORY: Failed to fetch readings history' });
     }
   });
   
-  // Get readings directly from ThingSpeak
-  app.get('/api/thingspeak/history', async (req, res) => {
-    try {
-      const days = parseInt(req.query.days as string) || 7;
-      
-      console.log(`Fetching ${days} days of data directly from ThingSpeak...`);
-      const readings = await fetchHistoricalReadings(days);
-      
-      if (readings.length === 0) {
-        return res.status(404).json({ error: 'No data found from ThingSpeak' });
-      }
-      
-      // Save readings to database if they don't already exist
-      for (const reading of readings) {
-        try {
-          await storage.saveReading(reading);
-        } catch (err) {
-          console.log('Reading might already exist in DB, skipping');
-        }
-      }
-      
-      const setpoints = await storage.getSetpoints();
-      
-      // Convert the readings to the format expected by the stats functions
-      // This is a temporary fix for the type error
-      const readingsWithId = readings.map(r => ({
-        ...r,
-        id: 0, // Temporary ID for stats calculation only
-        pumpStatus: r.pumpStatus || false,
-        heaterStatus: r.heaterStatus || false,
-        timestamp: r.timestamp || new Date(),
-      }));
-      
-      const tempStats = storage.getTemperatureStats(readingsWithId);
-      const levelStats = storage.getLevelStats(readingsWithId);
-      
-      res.json({
-        readings,
-        setpoints: {
-          temp: {
-            min: setpoints.tempMin,
-            max: setpoints.tempMax
-          },
-          level: {
-            min: setpoints.levelMin,
-            max: setpoints.levelMax
-          }
-        },
-        stats: {
-          temperature: tempStats,
-          level: levelStats
-        }
-      });
-    } catch (error) {
-      console.error('Error fetching readings from ThingSpeak:', error);
-      res.status(500).json({ error: 'Failed to fetch readings from ThingSpeak' });
-    }
-  });
-
   // Update setpoints
-  app.post('/api/setpoints', async (req, res) => {
+  app.post('/api/setpoints', logRequest, async (req, res) => {
+    console.log(`→ POST /api/setpoints - Request received`);
     try {
       const result = insertSetpointSchema.safeParse(req.body);
       
@@ -328,18 +174,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const updatedSetpoints = await storage.updateSetpoints(result.data);
       res.json(updatedSetpoints);
     } catch (error) {
-      console.error('Error updating setpoints:', error);
-      res.status(500).json({ error: 'Failed to update setpoints' });
+      console.error(`❌ POST /api/setpoints - Error:`, error);
+      res.status(500).json({ error: 'ERR_UPDATE_SETPOINTS: Failed to update setpoints' });
     }
   });
 
   // Get settings
-  app.get('/api/settings', async (req, res) => {
+  app.get('/api/settings', logRequest, async (req, res) => {
+    console.log(`→ GET /api/settings - Request received`);
     try {
       const settings = await storage.getSettings();
       res.json(settings);
     } catch (error) {
-      console.error('Error fetching settings:', error);
+      console.error(`❌ GET /api/settings - Error:`, error);
       res.status(500).json({ error: 'Failed to fetch settings' });
     }
   });
@@ -356,13 +203,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const updatedSettings = await storage.updateSettings(result.data);
       res.json(updatedSettings);
     } catch (error) {
-      console.error('Error updating settings:', error);
-      res.status(500).json({ error: 'Failed to update settings' });
+      console.error(`❌ POST /api/settings - Error:`, error);
+      res.status(500).json({ error: 'ERR_UPDATE_SETTINGS: Failed to update settings' });
     }
   });
 
   // Control pump - otimizado para resposta rápida sem persistência de histórico
-  app.post('/api/control/pump', async (req, res) => {
+  app.post('/api/control/pump', logRequest, async (req, res) => {
+    console.log(`→ POST /api/control/pump - Request received`);
     try {
       const schema = z.object({
         status: z.boolean()
@@ -374,11 +222,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: 'Invalid pump control data' });
       }
       
-      // Responder imediatamente para fornecer feedback rápido na interface
-      res.json({ success: true, pumpStatus: result.data.status });
-      
+      res.json({ success: true, pumpStatus: result.data.status, pending: true });
+
       // Processar atualização em segundo plano sem bloquear a resposta
       try {
+
         // Update ThingSpeak - usando o método individual da bomba
         const updateResult = await updatePumpStatus(result.data.status);
         
@@ -391,13 +239,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         console.error('❌ Erro em segundo plano ao atualizar bomba:', bgError);
       }
     } catch (error) {
-      console.error('Error controlling pump:', error);
-      res.status(500).json({ error: 'Failed to control pump' });
+      console.error(`❌ POST /api/control/pump - Error:`, error);
+      res.status(500).json({ error: 'ERR_CONTROL_PUMP: Failed to control pump' });
     }
   });
 
   // Control heater - otimizado para resposta rápida sem persistência de histórico
-  app.post('/api/control/heater', async (req, res) => {
+  app.post('/api/control/heater', logRequest, async (req, res) => {
+    console.log(`→ POST /api/control/heater - Request received`);
     try {
       const schema = z.object({
         status: z.boolean()
@@ -409,8 +258,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ error: 'Invalid heater control data' });
       }
       
-      // Responder imediatamente para fornecer feedback rápido na interface
-      res.json({ success: true, heaterStatus: result.data.status });
+      res.json({ success: true, heaterStatus: result.data.status, pending: true });
       
       // Processar atualização em segundo plano sem bloquear a resposta
       try {
@@ -426,13 +274,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
         console.error('❌ Erro em segundo plano ao atualizar aquecedor:', bgError);
       }
     } catch (error) {
-      console.error('Error controlling heater:', error);
-      res.status(500).json({ error: 'Failed to control heater' });
+      console.error(`❌ POST /api/control/heater - Error:`, error);
+      res.status(500).json({ error: 'ERR_CONTROL_HEATER: Failed to control heater' });
     }
   });
 
   // Rota para sincronização manual do backup
-  app.post('/api/backup/sync', async (req, res) => {
+  app.post('/api/backup/sync', logRequest, async (req, res) => {
+    console.log(`→ POST /api/backup/sync - Request received`);
     try {
       console.log('🔄 Manual backup sync requested');
       await backupService.syncData();
@@ -448,7 +297,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Rota para obter informações sobre o backup
-  app.get('/api/backup/status', async (req, res) => {
+  app.get('/api/backup/status', logRequest, async (req, res) => {
+    console.log(`→ GET /api/backup/status - Request received`);
     try {
       // Inicializar o serviço de backup se necessário
       if (!backupService.isInitialized) {
@@ -467,7 +317,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         totalBackupRecords: lastBackupInfo.totalRecords
       });
     } catch (error) {
-      console.error('Error checking backup status:', error);
+      console.error(`❌ GET /api/backup/status - Error:`, error);
       res.status(500).json({ 
         success: false, 
         status: 'offline',
@@ -478,7 +328,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
   
   // Rota para obter estatísticas do backup
-  app.get('/api/backup/stats', async (req, res) => {
+  app.get('/api/backup/stats', logRequest, async (req, res) => {
+    console.log(`→ GET /api/backup/stats - Request received`);
     try {
       if (!backupService.isInitialized) {
         await backupService.initialize();
@@ -490,7 +341,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         stats
       });
     } catch (error) {
-      console.error('Error fetching backup stats:', error);
+      console.error(`❌ GET /api/backup/stats - Error:`, error);
       res.status(500).json({ 
         success: false, 
         error: 'Falha ao obter estatísticas do backup',
@@ -500,39 +351,31 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Rota para importar dados históricos do ThingSpeak para o banco de dados local
-  app.post('/api/sync/thingspeak-to-db', async (req, res) => {
+  app.post('/api/readings/import-from-thingspeak', logRequest, async (req, res) => { // Renomeando a rota
+    console.log(`→ POST /api/readings/import-from-thingspeak - Request received`);
     try {
-      const days = parseInt(req.query.days as string || req.body.days as string) || 7;
-      
-      console.log(`🔄 Importando ${days} dias de dados do ThingSpeak para o banco de dados local...`);
-      
-      // Evitando bloqueio do banco de dados durante longos processos assíncronos
-      // Programamos o processo para ser executado em background
-      setTimeout(async () => {
-        try {
-          const count = await syncThingspeakToDatabase(days);
-          console.log(`✅ Importação em background finalizada: ${count} registros importados.`);
-        } catch (syncError) {
-          console.error('❌ Erro durante importação em background:', syncError);
-        }
-      }, 100);
-      
-      // Retorna imediatamente para evitar timeout do cliente
-      res.json({ 
-        success: true, 
-        message: `Importação de ${days} dias de dados iniciada em background. Os dados estarão disponíveis em breve.`,
+      const days = parseInt(req.query.days as string) || 7;
+      if (isNaN(days) || days <= 0) {
+        return res.status(400).json({ error: 'Invalid number of days' });
+      }
+
+      await syncService.importFromThingSpeak(days); // Chamando o serviço
+      res.json({
+        success: true,
+        message: `Importação de ${days} dias de dados iniciada em background.`,
+        
         count: 0,
         background: true
       });
     } catch (error) {
-      console.error('Error importing data from ThingSpeak to local database:', error);
-      res.status(500).json({ 
-        success: false, 
+      console.error(`❌ POST /api/readings/import-from-thingspeak - Error:`, error);
+      res.status(500).json({
+        success: false,
         error: 'Falha ao importar dados do ThingSpeak',
-        details: error instanceof Error ? error.message : 'Erro desconhecido' 
       });
     }
   });
 
   return httpServer;
 }
+

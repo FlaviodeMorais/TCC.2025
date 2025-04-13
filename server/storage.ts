@@ -1,11 +1,16 @@
-import { 
-  Reading, InsertReading, 
+// Teste de escrita
+import { Database } from 'sqlite'; // Teste de escrita
+// Teste de escrita
+import {
+  Reading, InsertReading,
   Setpoint, InsertSetpoint,
   Setting, InsertSetting,
-  ReadingStats
+  ReadingStats,
 } from "@shared/schema";
-import { createDb } from "./services/databaseService";
 
+import { initializeDb } from "./services/databaseService";
+import { readingsService } from "./index";
+  
 export interface IStorage {
   // Readings
   getLatestReadings(limit: number): Promise<Reading[]>;
@@ -81,18 +86,14 @@ export class MemStorage implements IStorage {
   async saveReading(reading: InsertReading): Promise<Reading> {
     const newReading: Reading = {
       id: this.readingId++,
-      ...reading,
+        ...reading,
+        pumpStatus: reading.pumpStatus ?? false,
+        heaterStatus: reading.heaterStatus ?? false,
+        
       timestamp: reading.timestamp || new Date()
     };
     
     this.readings.push(newReading);
-    
-    // Keep only the latest readings based on data retention setting
-    if (this.readings.length > this.settings.dataRetention * 1440) {
-      this.readings = this.readings
-        .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-        .slice(0, this.settings.dataRetention * 1440);
-    }
     
     return newReading;
   }
@@ -162,26 +163,28 @@ export class MemStorage implements IStorage {
   }
 }
 
-// For real storage implementation using SQLite
+import { getDb } from "./db";
+  
 export class SqliteStorage implements IStorage {
-  private db;
   private initialized = false;
-
+  
+  private db: Database | null = null;
   constructor() {
     this.init();
   }
 
   private async init() {
     try {
-      this.db = await createDb();
+      this.db = await getDb(); // Usando getDb para obter a conexão
+      await initializeDb(); // Inicializando as tabelas, se necessário
       this.initialized = true;
       console.log('✅ SqliteStorage initialized successfully');
     } catch (error) {
-      console.error('❌ Error initializing SqliteStorage:', error);
+      console.error('❌ Error initializing SqliteStorage database:', error);
       throw error;
     }
   }
-  
+
   private async ensureInitialized() {
     if (!this.initialized || !this.db) {
       console.log('🔄 Reinitializing database connection...');
@@ -189,9 +192,11 @@ export class SqliteStorage implements IStorage {
     }
   }
 
-  async getLatestReadings(limit: number): Promise<Reading[]> {
+async getLatestReadings(limit: number): Promise<Reading[]> {
+    if(!this.db) return [];
+
     await this.ensureInitialized();
-    return this.db.all(
+    return this.db.all<Reading[]>(
       `SELECT * FROM readings 
        ORDER BY timestamp DESC 
        LIMIT ?`, 
@@ -199,7 +204,8 @@ export class SqliteStorage implements IStorage {
     );
   }
 
-  async getReadingsByDateRange(startDate: string, endDate: string, maxResults = 1000): Promise<Reading[]> {
+async getReadingsByDateRange(startDate: string, endDate: string, maxResults = 1000): Promise<Reading[]> {
+    if(!this.db) return [];
     await this.ensureInitialized();
     console.log(`SQL Query: Buscando leituras entre ${startDate} e ${endDate} (max: ${maxResults})`);
     
@@ -212,8 +218,8 @@ export class SqliteStorage implements IStorage {
     
     try {
       // Verificar se podemos acessar a tabela de leituras
-      const tableCheck = await this.db.get(
-        `SELECT name FROM sqlite_master WHERE type='table' AND name='readings'`
+      const tableCheck = await this.db.get<{ name: string }>(
+        `SELECT name FROM sqlite_master WHERE type='table' AND name='readings'`,
       );
       
       if (!tableCheck) {
@@ -234,22 +240,24 @@ export class SqliteStorage implements IStorage {
       }
       
       // Contagem de leituras no banco
-      const countResult = await this.db.get('SELECT COUNT(*) as count FROM readings');
+      const countResult = await this.db.get<{ count: number }>('SELECT COUNT(*) as count FROM readings');
       console.log(`Total de leituras no banco: ${countResult ? countResult.count : 0}`);
       
       // Buscar leituras no intervalo de datas com limite
-      const readings = await this.db.all(
-        `SELECT * FROM readings 
-         WHERE datetime(timestamp) >= datetime(?) AND datetime(timestamp) <= datetime(?) 
+      const readings = await this.db.all<Reading[]>(
+        `SELECT id, temperature, level, pump_status, heater_status, timestamp
+         FROM readings
+         WHERE datetime(timestamp) >= datetime(?) AND datetime(timestamp) <= datetime(?)
          ORDER BY timestamp ASC
          LIMIT ?`,
-        [startDate + 'T00:00:00.000Z', adjustedEndDateString + 'T23:59:59.999Z', maxResults]
+        [startDate + 'T00:00:00.000Z', adjustedEndDateString + 'T23:59:59.999Z', maxResults],
       );
       
       console.log(`Encontradas ${readings.length} leituras no banco de dados para o período especificado.`);
       
       // Converter os booleanos corretamente
       const formattedReadings = readings.map(reading => ({
+        
         ...reading,
         pumpStatus: reading.pump_status === 1,
         heaterStatus: reading.heater_status === 1,
@@ -263,131 +271,71 @@ export class SqliteStorage implements IStorage {
     }
   }
 
-  async saveReading(reading: InsertReading): Promise<Reading> {
+async saveReading(reading: InsertReading): Promise<Reading> {
     await this.ensureInitialized();
-    
-    try {
-      // Verificar se já existe leitura com mesmo timestamp dentro de uma faixa de 5 segundos
-      // e com os mesmos valores para evitar duplicação de dados no banco
-      const timestamp = reading.timestamp || new Date();
-      const timestampMs = timestamp.getTime();
-      const minTime = new Date(timestampMs - 5000); // 5 segundos antes
-      const maxTime = new Date(timestampMs + 5000); // 5 segundos depois
-      
-      const existingRecord = await this.db.get(
-        `SELECT id FROM readings 
-         WHERE datetime(timestamp) BETWEEN datetime(?) AND datetime(?)
-         AND pump_status = ? AND heater_status = ?
-         AND ABS(temperature - ?) < 0.1
-         AND ABS(level - ?) < 0.1
-         ORDER BY id DESC LIMIT 1`,
-        [
-          minTime.toISOString(), 
-          maxTime.toISOString(), 
-          reading.pumpStatus ? 1 : 0, 
-          reading.heaterStatus ? 1 : 0,
-          reading.temperature,
-          reading.level
-        ]
-      );
-      
-      // Se encontrar registro similar recente com mesmos valores, não insere novamente
-      if (existingRecord) {
-        console.log(`⚠️ [${new Date().toLocaleTimeString()}] Detectada leitura similar recente (ID: ${existingRecord.id}), evitando duplicação`);
-        // Retornar o registro existente em vez de criar novo
-        const existingReading = await this.db.get(
-          `SELECT * FROM readings WHERE id = ?`, 
-          [existingRecord.id]
-        );
-        return {
-          ...existingReading,
-          pumpStatus: existingReading.pump_status === 1,
-          heaterStatus: existingReading.heater_status === 1,
-          timestamp: new Date(existingReading.timestamp)
-        };
-      }
-      
-      // Verificar o estado atual dos dispositivos em memória (mais recente que o banco)
-      const { getCurrentDeviceStatus } = await import('./services/thingspeakService');
-      const memoryState = getCurrentDeviceStatus();
-      
-      // Forçar consistência entre o log e o banco de dados
-      const pumpStatusToLog = memoryState ? memoryState.pumpStatus : reading.pumpStatus;
-      const heaterStatusToLog = memoryState ? memoryState.heaterStatus : reading.heaterStatus;
-      
-      // Inserir nova leitura se não existir similar
-      console.log(`✅ [${new Date().toLocaleTimeString()}] Inserindo nova leitura: Temp=${reading.temperature.toFixed(1)}°C, Nível=${reading.level}%, Bomba=${pumpStatusToLog ? 'ON' : 'OFF'}, Aquecedor=${heaterStatusToLog ? 'ON' : 'OFF'}`);
-      
+
+    if (this.db) {
       const result = await this.db.run(
-        `INSERT INTO readings (temperature, level, pump_status, heater_status, timestamp) 
-         VALUES (?, ?, ?, ?, ?)`,
-        [
-          reading.temperature,
-          reading.level,
-          reading.pumpStatus ? 1 : 0,
-          reading.heaterStatus ? 1 : 0,
-          timestamp
-        ]
+        `INSERT INTO readings (temperature, level, pump_status, heater_status, timestamp) VALUES (?, ?, ?, ?, ?)`,
+        [reading.temperature, reading.level, reading.pumpStatus ? 1 : 0, reading.heaterStatus ? 1 : 0, (reading.timestamp ?? new Date()).toISOString()]
       );
-    
-    return {
-      id: result.lastID,
-      ...reading,
-      timestamp: reading.timestamp || new Date()
-    };
-    } catch (error) {
-      console.error('❌ Erro ao salvar leitura no banco:', error);
-      throw error;
     }
-  }
 
-  async getSetpoints(): Promise<Setpoint> {
-    await this.ensureInitialized();
-    return this.db.get('SELECT * FROM setpoints WHERE id = 1');
+    // Este retorno parece estranho... Se o this.db não existir, ainda irá retornar.
+    // e ainda por cima irá chamar outro serviço.
+    return readingsService.checkDuplicateAndSave(reading);
   }
-
+    async getSetpoints(): Promise<Setpoint> {
+    await this.ensureInitialized();  if(!this.db) throw new Error("Database is null");
+    return this.db.get<Setpoint>('SELECT * FROM setpoints WHERE id = 1') as Promise<Setpoint>;
+  }
+    
   async updateSetpoints(setpoints: InsertSetpoint): Promise<Setpoint> {
     await this.ensureInitialized();
     
-    await this.db.run(
-      `UPDATE setpoints 
-       SET temp_min = ?, temp_max = ?, level_min = ?, level_max = ?, updated_at = CURRENT_TIMESTAMP 
-       WHERE id = 1`,
-      [setpoints.tempMin, setpoints.tempMax, setpoints.levelMin, setpoints.levelMax]
-    );
+    const columns = Object.keys(setpoints).map(key => `${this.toSnakeCase(key)} = ?`).join(', ');
+    const values = Object.values(setpoints);
+    if(this.db) {
+        await this.db.run(
+            `UPDATE setpoints
+            SET ${columns}, updated_at = CURRENT_TIMESTAMP
+            WHERE id = 1`,
+            values
+        );
+    }
     
     return this.getSetpoints();
   }
 
   async getSettings(): Promise<Setting> {
     await this.ensureInitialized();
-    
-    const settings = await this.db.get('SELECT * FROM settings WHERE id = 1');
+    if(!this.db) throw new Error("Database is null");
+    const settings = await this.db.get<Setting>('SELECT * FROM settings WHERE id = 1');
     if (settings) return settings;
     
     // Create default settings if they don't exist
-    await this.db.run(`
-      INSERT INTO settings (id) VALUES (1)
-    `);
-    
-    return this.db.get('SELECT * FROM settings WHERE id = 1');
+    if(this.db) {
+        await this.db.run(`
+        INSERT INTO settings (id) VALUES (1)
+        `);
+
+        return this.db.get<Setting>('SELECT * FROM settings WHERE id = 1') as Promise<Setting>;
+    } else {
+        throw new Error("Database is null");
+    }
   }
 
   async updateSettings(settings: InsertSetting): Promise<Setting> {
     await this.ensureInitialized();
-    
+    if(!this.db) throw new Error("Database is null");
+
     const columns = Object.keys(settings).map(key => `${this.toSnakeCase(key)} = ?`).join(', ');
-    const values = Object.values(settings);
-    
-    await this.db.run(
-      `UPDATE settings 
-       SET ${columns}, updated_at = CURRENT_TIMESTAMP 
-       WHERE id = 1`,
-      values
-    );
+      const values = Object.values(settings);
+      await this.db.run(`UPDATE settings SET ${columns}, updated_at = CURRENT_TIMESTAMP WHERE id = 1`, values);
     
     return this.getSettings();
   }
+
   
   private toSnakeCase(str: string): string {
     return str.replace(/([A-Z])/g, '_$1').toLowerCase();

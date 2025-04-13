@@ -31,13 +31,19 @@ let currentDeviceStatus = {
   lastUpdate: new Date()
 };
 
+export type DeviceStatus = {
+  pumpStatus: boolean;
+  heaterStatus: boolean;
+  lastUpdate: Date;
+};
+
 /**
  * Função para garantir consistência dos valores no ThingSpeak
  * Esta função é chamada periodicamente para sincronizar o estado dos dispositivos
  */
 async function ensureConsistentDeviceState() {
   try {
-    console.log("🔄 Verificando consistência dos valores no ThingSpeak...");
+    console.log("🔄 [ThingSpeak] Verificando consistência dos valores no ThingSpeak...");
     const timestamp = new Date().getTime();
     
     const response = await fetch(
@@ -57,7 +63,7 @@ async function ensureConsistentDeviceState() {
     const data = await response.json() as ThingspeakFeedsResponse;
     
     if (!data.feeds || data.feeds.length === 0) {
-      console.log("⚠️ Nenhum dado encontrado no ThingSpeak.");
+      console.log("⚠️ [ThingSpeak] Nenhum dado encontrado no ThingSpeak.");
       return;
     }
     
@@ -68,19 +74,17 @@ async function ensureConsistentDeviceState() {
     const thingspeakHeaterStatus = parseThingspeakBoolean(latestFeed.field4);
     
     if (thingspeakPumpStatus !== currentDeviceStatus.pumpStatus || 
-        thingspeakHeaterStatus !== currentDeviceStatus.heaterStatus) {
-      console.log(`⚠️ Discrepância detectada: 
-      Memória: Bomba=${currentDeviceStatus.pumpStatus}, Aquecedor=${currentDeviceStatus.heaterStatus}
-      ThingSpeak: Bomba=${thingspeakPumpStatus}, Aquecedor=${thingspeakHeaterStatus}`);
+      thingspeakHeaterStatus !== currentDeviceStatus.heaterStatus) {
+      console.log(`⚠️ [ThingSpeak] Discrepância detectada: Memória: Bomba=${currentDeviceStatus.pumpStatus}, Aquecedor=${currentDeviceStatus.heaterStatus} | ThingSpeak: Bomba=${thingspeakPumpStatus}, Aquecedor=${thingspeakHeaterStatus}`);
       
-      // Atualizar estado em memória para refletir valores reais
+      // Atualizar o estado em memória para refletir os valores reais
       currentDeviceStatus.pumpStatus = thingspeakPumpStatus;
       currentDeviceStatus.heaterStatus = thingspeakHeaterStatus;
       currentDeviceStatus.lastUpdate = new Date();
       
-      console.log(`✅ Estado em memória atualizado para: Bomba=${currentDeviceStatus.pumpStatus}, Aquecedor=${currentDeviceStatus.heaterStatus}`);
+      console.log(`✅ [ThingSpeak] Estado em memória atualizado para: Bomba=${currentDeviceStatus.pumpStatus}, Aquecedor=${currentDeviceStatus.heaterStatus}`);
     } else {
-      console.log("✅ Estado dos dispositivos está consistente.");
+      console.log("✅ [ThingSpeak] Estado dos dispositivos está consistente.");
     }
     
   } catch (error) {
@@ -100,12 +104,12 @@ setTimeout(ensureConsistentDeviceState, 10000);
  * IMPORTANTE: Este estado reflete a última ação solicitada pelo usuário e é mais recente
  * que o estado no banco ou no ThingSpeak. Use-o para feedback imediato na interface.
  */
-export function getCurrentDeviceStatus() {
+export function getCurrentDeviceStatus(): DeviceStatus {
   return { 
     pumpStatus: currentDeviceStatus.pumpStatus,
     heaterStatus: currentDeviceStatus.heaterStatus,
     lastUpdate: new Date(currentDeviceStatus.lastUpdate.getTime())
-  };
+  } as DeviceStatus;
 }
 
 // Helper function to parse numbers safely
@@ -126,9 +130,12 @@ export async function fetchLatestReading(retries = 3): Promise<InsertReading | n
   // Primeiro tenta buscar o último dado
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      console.log(`📡 Fetching data from ThingSpeak (attempt ${attempt}/${retries})...`);
+      const startTime = Date.now(); // Start time for measuring total fetch time
+      console.log(`📡 [ThingSpeak] Iniciando busca de dados (tentativa ${attempt}/${retries})...`);
       
       const controller = new AbortController();
+      
+      // Define um timeout para a requisição
       const timeoutId = setTimeout(() => controller.abort(), timeout);
       
       // Busca os dados mais recentes com o parâmetro results=1 para melhor desempenho
@@ -148,7 +155,7 @@ export async function fetchLatestReading(retries = 3): Promise<InsertReading | n
       clearTimeout(timeoutId);
       
       if (!response.ok) {
-        throw new Error(`HTTP Error! Status: ${response.status}`);
+        throw new Error(`[ThingSpeak] HTTP Error! Status: ${response.status}`);
       }
       
       const text = await response.text();
@@ -158,13 +165,13 @@ export async function fetchLatestReading(retries = 3): Promise<InsertReading | n
       try {
         feedsData = JSON.parse(text);
       } catch (e) {
-        console.error('❌ Error parsing JSON:', e);
-        throw new Error('Invalid ThingSpeak response');
+        console.error('❌ [ThingSpeak] Error parsing JSON:', e);
+        throw new Error('[ThingSpeak] Invalid ThingSpeak response');
       }
       
       if (!feedsData || !feedsData.feeds || feedsData.feeds.length === 0) {
-        console.log('⚠️ No data received from ThingSpeak');
-        return getDefaultReading();
+        console.warn('⚠️ [ThingSpeak] Nenhum dado recebido do ThingSpeak');
+        return getDefaultReading(); // Retorna leitura padrão
       }
       
       // Buscar o dado mais recente que tenha temperatura ou nível não nulo
@@ -183,8 +190,14 @@ export async function fetchLatestReading(retries = 3): Promise<InsertReading | n
         data = feedsData.feeds[feedsData.feeds.length - 1];
       }
       
-      console.log('📊 Original ThingSpeak data:', data);
+      console.log('📊 [ThingSpeak] Dados originais recebidos:', data);
+
+      // Usar o timestamp do ThingSpeak, se disponível, ou a data atual como fallback
+      const readingTimestamp = data.created_at
+        ? new Date(data.created_at)
+        : new Date();
       
+        
       // Criar leitura com valores do ThingSpeak, mas sempre com um timestamp atual
       // para garantir dados que pareçam estar em tempo real
       
@@ -203,18 +216,21 @@ export async function fetchLatestReading(retries = 3): Promise<InsertReading | n
         level: parseThingspeakNumber(data.field2),
         pumpStatus: pumpStatus,
         heaterStatus: heaterStatus,
-        timestamp: new Date() // Sempre usar a data atual para simular dados em tempo real
+        timestamp: readingTimestamp // Usar o timestamp original do ThingSpeak ou o atual como fallback
       };
       
-      console.log('✅ Formatted reading:', reading);
+      const endTime = Date.now();
+      const duration = endTime - startTime;
+      console.log(`✅ [ThingSpeak] Leitura formatada recebida em ${duration}ms`, reading);
       return reading;
       
     } catch (error) {
-      console.error(`❌ Attempt ${attempt} failed:`, error);
+      console.error(`❌ [ThingSpeak] Tentativa ${attempt} falhou:`, error);
       if (attempt === retries) {
-        console.log('⚠️ All attempts failed. Using default values.');
-        return getDefaultReading();
+        console.error('⚠️ [ThingSpeak] Todas as tentativas falharam. Usando valores padrão.');
+        return getDefaultReading();// Retorna leitura padrão
       }
+      
       // Wait before retrying (exponential backoff)
       await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
     }
@@ -229,6 +245,7 @@ export async function fetchLatestReading(retries = 3): Promise<InsertReading | n
  */
 export async function updateField(field: string, value: string | number): Promise<boolean> {
   try {
+    const startTime = Date.now();
     // Adicionar timestamp para evitar cache
     const timestamp = new Date().getTime();
     
@@ -237,7 +254,7 @@ export async function updateField(field: string, value: string | number): Promis
     url.searchParams.append(field, value.toString());
     url.searchParams.append('t', timestamp.toString());
     
-    console.log(`Enviando requisição para ThingSpeak: ${field}=${value}`);
+    console.log(`➡️ [ThingSpeak] Enviando requisição para ThingSpeak: ${field}=${value}`);
     
     // Usar um timeout mais curto para atualizações
     const controller = new AbortController();
@@ -259,11 +276,14 @@ export async function updateField(field: string, value: string | number): Promis
     }
     
     const updateResult = await response.text();
-    console.log(`✅ ThingSpeak update result for ${field}: ${updateResult}`);
+    const endTime = Date.now();
+    const duration = endTime - startTime;
+    console.log(`✅ [ThingSpeak] Atualização do campo ${field} para ${value} em ${duration}ms | Resultado: ${updateResult} | Timestamp: ${new Date().toISOString()}`);
     return updateResult !== '0';
     
   } catch (error) {
-    console.error(`❌ Error updating field ${field} on ThingSpeak:`, error);
+    console.error(`❌ [ThingSpeak] Erro ao atualizar o campo ${field} no ThingSpeak:`, error);
+    
     return false;
   }
 }
@@ -273,9 +293,12 @@ export async function updateField(field: string, value: string | number): Promis
  */
 export async function updatePumpStatus(status: boolean): Promise<boolean> {
   // Atualizar variável em memória com o status atual
+  console.log(`➡️ [ThingSpeak] Atualizando status da bomba para ${status ? 'LIGADO' : 'DESLIGADO'}...`);
   currentDeviceStatus.pumpStatus = status;
   currentDeviceStatus.lastUpdate = new Date();
   
+  const result = await updateField('field3', status ? '1' : '0');
+  console.log(`✅ [ThingSpeak] Bomba atualizada para ${status ? 'LIGADO' : 'DESLIGADO'}`, result ? 'com sucesso' : 'com falha')
   return updateField('field3', status ? '1' : '0');
 }
 
@@ -284,62 +307,13 @@ export async function updatePumpStatus(status: boolean): Promise<boolean> {
  */
 export async function updateHeaterStatus(status: boolean): Promise<boolean> {
   // Atualizar variável em memória com o status atual
+  console.log(`➡️ [ThingSpeak] Atualizando status do aquecedor para ${status ? 'LIGADO' : 'DESLIGADO'}...`);
   currentDeviceStatus.heaterStatus = status;
   currentDeviceStatus.lastUpdate = new Date();
   
+  const result = await updateField('field4', status ? '1' : '0');
+  console.log(`✅ [ThingSpeak] Aquecedor atualizado para ${status ? 'LIGADO' : 'DESLIGADO'}`, result ? 'com sucesso' : 'com falha')
   return updateField('field4', status ? '1' : '0');
-}
-
-/**
- * Updates both devices status on ThingSpeak simultaneously (maintained for backward compatibility)
- * 
- * IMPORTANTE: Este método também atualiza a variável em memória como as funções
- * individuais updatePumpStatus e updateHeaterStatus fazem, garantindo feedback imediato
- * na interface do usuário enquanto aguardamos a confirmação do ThingSpeak.
- */
-export async function updateDeviceStatus(pumpStatus: boolean, heaterStatus: boolean): Promise<boolean> {
-  try {
-    // PRIMEIRO: Atualizar variáveis em memória para feedback imediato
-    currentDeviceStatus.pumpStatus = pumpStatus;
-    currentDeviceStatus.heaterStatus = heaterStatus;
-    currentDeviceStatus.lastUpdate = new Date();
-    
-    // Adicionar timestamp para evitar cache
-    const timestamp = new Date().getTime();
-    
-    const url = new URL(`${THINGSPEAK_BASE_URL}/update`);
-    url.searchParams.append('api_key', THINGSPEAK_WRITE_API_KEY);
-    url.searchParams.append('field3', pumpStatus ? '1' : '0');
-    url.searchParams.append('field4', heaterStatus ? '1' : '0');
-    url.searchParams.append('t', timestamp.toString());
-    
-    // Usar um timeout mais curto para atualizações
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 1500);
-    
-    const response = await fetch(url.toString(), {
-      method: 'POST',
-      headers: {
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache'
-      },
-      signal: controller.signal
-    });
-    
-    clearTimeout(timeoutId);
-    
-    if (!response.ok) {
-      throw new Error(`HTTP Error! Status: ${response.status}`);
-    }
-    
-    const updateResult = await response.text();
-    console.log(`✅ ThingSpeak update result: ${updateResult}`);
-    return updateResult !== '0';
-    
-  } catch (error) {
-    console.error('❌ Error updating device status on ThingSpeak:', error);
-    return false;
-  }
 }
 
 /**
@@ -370,7 +344,7 @@ export async function fetchHistoricalReadings(days = 7): Promise<InsertReading[]
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 segundos
     
-    console.log(`Fetching ${days} days of data directly from ThingSpeak with timeout...`);
+    console.log(`📡 [ThingSpeak] Iniciando busca de dados históricos (timeout de 10s) | ${days} dias de dados...`);
     
     const response = await fetch(url.toString(), {
       headers: {
@@ -384,12 +358,14 @@ export async function fetchHistoricalReadings(days = 7): Promise<InsertReading[]
     
     if (!response.ok) {
       throw new Error(`HTTP Error! Status: ${response.status}`);
-    }
-    
-    const data = await response.json() as ThingspeakFeedsResponse;
-    
+    }  
+    const data = await response.json() as ThingspeakFeedsResponse;    
     if (!data.feeds || data.feeds.length === 0) {
+      console.warn('⚠️ [ThingSpeak] Nenhum dado recebido do ThingSpeak para o período especificado');
       return [];
+    }else{
+      console.log(`✅ [ThingSpeak] Busca de dados concluída, ${data.feeds.length} registros recebidos`);
+      
     }
     
     // Para dados históricos, mantemos os timestamps originais
@@ -413,7 +389,7 @@ export async function fetchHistoricalReadings(days = 7): Promise<InsertReading[]
     });
     
   } catch (error) {
-    console.error('Error fetching historical data from ThingSpeak:', error);
+    console.error('❌ [ThingSpeak] Error fetching historical data from ThingSpeak:', error);
     return [];
   }
 }
